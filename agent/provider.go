@@ -336,6 +336,15 @@ type quotaAwareTransport struct {
 }
 
 func (t quotaAwareTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	// net/http otherwise sends "Go-http-client/1.1". Some upstream WAFs block
+	// that generic automation signature before the request reaches the API,
+	// returning an HTML 403 even though the endpoint, key and model are valid.
+	// Preserve an explicitly configured User-Agent; supply a browser-compatible
+	// default only when the provider did not set one.
+	if req.Header.Get("User-Agent") == "" {
+		req.Header.Set("User-Agent", "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36")
+	}
+
 	// Custom session-id header: name is user-configured, value is THIS run's
 	// session id (norma stashes it on the context via transcript.WithSessionID).
 	// Stable across a session's turns and distinct across sessions — exactly what
