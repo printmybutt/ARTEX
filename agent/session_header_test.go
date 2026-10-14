@@ -64,3 +64,28 @@ func TestSessionHeaderSkippedWhenNoSessionID(t *testing.T) {
 		t.Fatalf("x-session-id = %q, want empty when no session id on context", got)
 	}
 }
+
+func TestQuotaAwareTransportAddsBrowserCompatibleUserAgent(t *testing.T) {
+	base := &fakeRT{}
+	rt := quotaAwareTransport{base: base}
+	if _, err := rt.RoundTrip(newReq(context.Background())); err != nil {
+		t.Fatalf("RoundTrip: %v", err)
+	}
+	got := base.seen.Header.Get("User-Agent")
+	if !strings.HasPrefix(got, "Mozilla/5.0") {
+		t.Fatalf("User-Agent = %q, want browser-compatible default", got)
+	}
+}
+
+func TestQuotaAwareTransportPreservesExplicitUserAgent(t *testing.T) {
+	base := &fakeRT{}
+	rt := quotaAwareTransport{base: base}
+	req := newReq(context.Background())
+	req.Header.Set("User-Agent", "custom-client/1.0")
+	if _, err := rt.RoundTrip(req); err != nil {
+		t.Fatalf("RoundTrip: %v", err)
+	}
+	if got := base.seen.Header.Get("User-Agent"); got != "custom-client/1.0" {
+		t.Fatalf("User-Agent = %q, want explicit value preserved", got)
+	}
+}
