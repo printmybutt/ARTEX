@@ -1,6 +1,7 @@
 package db
 
 import (
+	"errors"
 	"sort"
 	"strconv"
 	"strings"
@@ -86,7 +87,12 @@ type TaskTimelineResult struct {
 	HasMoreEvents bool                      `json:"has_more_events"`
 }
 
-const timelineEventPageSize = 100
+const (
+	timelineEventPageSize = 100
+	timelineMaxBuckets    = 672
+)
+
+var errTimelineTooManyBuckets = errors.New("timeline range exceeds 672 buckets")
 
 // EnsureLLMUsageTable creates the llm_usage metering table if it does not exist.
 func (d *DB) EnsureLLMUsageTable() error {
@@ -156,8 +162,19 @@ ORDER BY SUM(input_tokens) + SUM(output_tokens) DESC, model`, taskID)
 // has both task_id and exploration_id.
 func (d *DB) TaskTimeline(taskID int64, explorationID int64, from, to time.Time, bucketSeconds int, after *TaskTimelineEventMarker) (*TaskTimelineResult, error) {
 	elapsed := to.Sub(from)
-	bucketCount := int(elapsed / time.Duration(bucketSeconds) * time.Second)
-	if elapsed%time.Duration(bucketSeconds)*time.Second != 0 {
+	if elapsed <= 0 {
+		return &TaskTimelineResult{
+			UsageStatus:  "no_rows",
+			Buckets:      []TaskTimelineBucket{},
+			EventMarkers: []TaskTimelineEventMarker{},
+		}, nil
+	}
+	bucketSpan := time.Duration(bucketSeconds) * time.Second
+	bucketCount := int((elapsed + bucketSpan - 1) / bucketSpan)
+	if bucketCount < 0 || bucketCount > timelineMaxBuckets {
+		return nil, errTimelineTooManyBuckets
+	}
+	if elapsed%bucketSpan != 0 {
 		bucketCount++
 	}
 	out := &TaskTimelineResult{
