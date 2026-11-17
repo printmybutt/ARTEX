@@ -174,9 +174,6 @@ func (d *DB) TaskTimeline(taskID int64, explorationID int64, from, to time.Time,
 	if bucketCount < 0 || bucketCount > timelineMaxBuckets {
 		return nil, errTimelineTooManyBuckets
 	}
-	if elapsed%bucketSpan != 0 {
-		bucketCount++
-	}
 	out := &TaskTimelineResult{
 		UsageStatus:  "no_rows",
 		Buckets:      make([]TaskTimelineBucket, bucketCount),
@@ -206,7 +203,7 @@ SELECT bucket_no, COUNT(*)::bigint, COUNT(*) FILTER (WHERE status='error')::bigi
        COALESCE(SUM(cache_read),0)::bigint, COALESCE(SUM(cache_write),0)::bigint
 FROM (
 	SELECT DISTINCT u.id,
-           floor(extract(epoch FROM ($2 - u.ts)) / $3)::int AS bucket_no,
+           floor(extract(epoch FROM (u.ts - $2)) / $3)::int AS bucket_no,
            u.input_tokens, u.output_tokens, u.cache_read, u.cache_write, u.status
     FROM llm_usage u
     LEFT JOIN tasks task ON task.exploration_id = u.exploration_id
@@ -246,11 +243,11 @@ GROUP BY bucket_no`, strconv.FormatInt(taskID, 10), from, bucketSeconds, explora
 	}
 
 	activityRows, err := tx.Query(`
-SELECT floor(extract(epoch FROM ($2 - a.created_at)) / $3)::int AS bucket_no,
+SELECT floor(extract(epoch FROM (a.created_at - $1::timestamptz)) / $2)::int AS bucket_no,
        a.worker, a.kind, a.id, a.created_at
 FROM activity a
-WHERE a.exploration_id = $4 AND a.created_at >= $2 AND a.created_at < $5
-GROUP BY bucket_no, a.worker, a.kind, a.id, a.created_at`, taskID, from, bucketSeconds, explorationID, to)
+WHERE a.exploration_id = $3 AND a.created_at >= $1::timestamptz AND a.created_at < $4::timestamptz`,
+		from, bucketSeconds, explorationID, to)
 	if err != nil {
 		return nil, err
 	}

@@ -52,8 +52,8 @@ func TestTaskTimelineAPIContract(t *testing.T) {
 		{"/api/tasks/missing/timeline", http.StatusNotFound, ""},
 		{"/api/tasks/" + task.ID + "/timeline?bucket_seconds=60", http.StatusBadRequest, "bucket_seconds"},
 		{
-			"/api/tasks/" + task.ID + "/timeline?from=" + time.Now().UTC().Format(time.RFC3339) +
-				"&to=" + time.Now().UTC().Add(time.Hour).Format(time.RFC3339),
+			"/api/tasks/" + task.ID + "/timeline?from=" + time.Now().UTC().Add(time.Hour).Format(time.RFC3339) +
+				"&to=" + time.Now().UTC().Format(time.RFC3339),
 			http.StatusBadRequest, "from must be earlier",
 		},
 		{"/api/tasks/" + task.ID + "/timeline?bucket_seconds=3600", http.StatusOK, ""},
@@ -85,7 +85,7 @@ func TestTaskTimelineAPIContract(t *testing.T) {
 		t.Fatalf("unexpected timeline response: %+v", response)
 	}
 	if _, err := m.pg.Exec(`INSERT INTO llm_usage(task_id, exploration_id, input_tokens, output_tokens) VALUES ($1,$2,123,7)`,
-		numericTaskID, task.ExpID); err != nil {
+		strconv.FormatInt(numericTaskID, 10), task.ExpID); err != nil {
 		t.Fatal(err)
 	}
 	rec = request("/api/tasks/" + task.ID + "/timeline")

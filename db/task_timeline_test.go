@@ -1,6 +1,7 @@
 package db
 
 import (
+	"strconv"
 	"testing"
 	"time"
 )
@@ -11,6 +12,10 @@ func TestTaskTimelineAggregatesLedgerAndActivity(t *testing.T) {
 		t.Skipf("postgres unavailable (%v) - skipping", err)
 	}
 	t.Cleanup(func() { _ = d.Close() })
+
+	if err := d.EnsureLLMUsageTable(); err != nil {
+		t.Fatal(err)
+	}
 
 	task, err := d.CreateTask("timeline-usage", "timeline goal", nil, 0, 0)
 	if err != nil {
@@ -26,7 +31,7 @@ VALUES
  ($1,$2,'planner','model-a','p',100,20,40,5,'ok',$3),
  ($1,$2,'worker','model-a','p',200,30,60,10,'error',$4),
  ($1,$2,'worker','model-b','p',400,50,80,20,'ok',$5)`,
-		task.ID, task.ExplorationID, from.Add(30*time.Minute), from.Add(90*time.Minute), to.Add(time.Minute)); err != nil {
+		strconv.FormatInt(task.ID, 10), task.ExplorationID, from.Add(30*time.Minute), from.Add(90*time.Minute), to.Add(time.Minute)); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := d.Exec(`
@@ -87,6 +92,10 @@ func TestTaskTimelineNoLedgerRows(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = d.Close() })
 
+	if err := d.EnsureLLMUsageTable(); err != nil {
+		t.Fatal(err)
+	}
+
 	task, err := d.CreateTask("timeline-empty", "timeline goal", nil, 0, 0)
 	if err != nil {
 		t.Fatal(err)
@@ -105,5 +114,61 @@ func TestTaskTimelineNoLedgerRows(t *testing.T) {
 		if bucket.HasUsage || bucket.InputTokens != 0 {
 			t.Fatalf("empty bucket should not be marked as usage: %+v", bucket)
 		}
+	}
+}
+
+func TestTaskTimelineNegativeRangeReturnsEmpty(t *testing.T) {
+	d, err := Open(testDSN(t))
+	if err != nil {
+		t.Skipf("postgres unavailable (%v) - skipping", err)
+	}
+	t.Cleanup(func() { _ = d.Close() })
+
+	if err := d.EnsureLLMUsageTable(); err != nil {
+		t.Fatal(err)
+	}
+
+	task, err := d.CreateTask("timeline-negative", "timeline goal", nil, 0, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = d.DeleteTask(task.ID) })
+
+	from := time.Now().UTC()
+	result, err := d.TaskTimeline(task.ID, task.ExplorationID, from, from.Add(-time.Hour), 900, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.UsageStatus != "no_rows" || len(result.Buckets) != 0 || len(result.EventMarkers) != 0 {
+		t.Fatalf("negative range should return an empty result, got %+v", result)
+	}
+}
+
+func TestTaskTimelinePartialBucketRoundsUp(t *testing.T) {
+	d, err := Open(testDSN(t))
+	if err != nil {
+		t.Skipf("postgres unavailable (%v) - skipping", err)
+	}
+	t.Cleanup(func() { _ = d.Close() })
+
+	if err := d.EnsureLLMUsageTable(); err != nil {
+		t.Fatal(err)
+	}
+
+	task, err := d.CreateTask("timeline-partial", "timeline goal", nil, 0, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = d.DeleteTask(task.ID) })
+
+	// 1.5 hours at a 15-minute grain is 6 buckets; the trailing half hour must
+	// not add a phantom 7th bucket.
+	from := time.Now().UTC().Add(-90 * time.Minute).Truncate(15 * time.Minute)
+	result, err := d.TaskTimeline(task.ID, task.ExplorationID, from, from.Add(90*time.Minute), 900, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(result.Buckets) != 6 {
+		t.Fatalf("expected 6 buckets, got %d", len(result.Buckets))
 	}
 }
