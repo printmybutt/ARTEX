@@ -6,6 +6,16 @@ import (
 	"time"
 )
 
+// deref unwraps a *int64 token field, failing the test when a bucket that has
+// ledger rows unexpectedly carries a nil token value.
+func deref(t *testing.T, label string, p *int64) int64 {
+	t.Helper()
+	if p == nil {
+		t.Fatalf("%s is nil but bucket has usage", label)
+	}
+	return *p
+}
+
 func TestTaskTimelineAggregatesLedgerAndActivity(t *testing.T) {
 	d, err := Open(testDSN(t))
 	if err != nil {
@@ -66,13 +76,15 @@ WHERE exploration_id=$1 AND kind='result'`, task.ExplorationID); err != nil {
 			second = bucket
 		}
 	}
-	if !first.HasUsage || first.Calls != 1 || first.FailedCalls != 0 || first.InputTokens != 100 ||
-		first.OutputTokens != 20 || first.CacheReadTokens != 40 || first.CacheWriteTokens != 5 ||
+	if !first.HasUsage || first.Calls != 1 || first.FailedCalls != 0 || deref(t, "first.InputTokens", first.InputTokens) != 100 ||
+		deref(t, "first.OutputTokens", first.OutputTokens) != 20 || deref(t, "first.CacheReadTokens", first.CacheReadTokens) != 40 ||
+		deref(t, "first.CacheWriteTokens", first.CacheWriteTokens) != 5 ||
 		first.PlannerRounds != 1 || first.WorkerResultRows != 0 {
 		t.Fatalf("unexpected first bucket: %+v", first)
 	}
-	if !second.HasUsage || second.Calls != 1 || second.FailedCalls != 1 || second.InputTokens != 200 ||
-		second.OutputTokens != 30 || second.CacheReadTokens != 60 || second.CacheWriteTokens != 10 ||
+	if !second.HasUsage || second.Calls != 1 || second.FailedCalls != 1 || deref(t, "second.InputTokens", second.InputTokens) != 200 ||
+		deref(t, "second.OutputTokens", second.OutputTokens) != 30 || deref(t, "second.CacheReadTokens", second.CacheReadTokens) != 60 ||
+		deref(t, "second.CacheWriteTokens", second.CacheWriteTokens) != 10 ||
 		second.PlannerRounds != 1 || second.WorkerResultRows != 1 {
 		t.Fatalf("unexpected second bucket: %+v", second)
 	}
@@ -111,7 +123,8 @@ func TestTaskTimelineNoLedgerRows(t *testing.T) {
 		t.Fatalf("unexpected empty result: status=%q buckets=%d", result.UsageStatus, len(result.Buckets))
 	}
 	for _, bucket := range result.Buckets {
-		if bucket.HasUsage || bucket.InputTokens != 0 {
+		if bucket.HasUsage || bucket.InputTokens != nil || bucket.OutputTokens != nil ||
+			bucket.CacheReadTokens != nil || bucket.CacheWriteTokens != nil {
 			t.Fatalf("empty bucket should not be marked as usage: %+v", bucket)
 		}
 	}

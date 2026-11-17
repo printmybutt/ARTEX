@@ -55,16 +55,19 @@ CREATE INDEX IF NOT EXISTS idx_llm_usage_exp   ON llm_usage(exploration_id);
 // the same bucket start. All zero values are meaningful only when HasUsage is
 // true (the corresponding interval has ledger rows).
 type TaskTimelineBucket struct {
-	Start            time.Time `json:"start"`
-	HasUsage         bool      `json:"has_usage"`
-	Calls            int       `json:"calls"`
-	FailedCalls      int       `json:"failed_calls"`
-	InputTokens      int64     `json:"input_tokens"`
-	OutputTokens     int64     `json:"output_tokens"`
-	CacheReadTokens  int64     `json:"cache_read_tokens"`
-	CacheWriteTokens int64     `json:"cache_write_tokens"`
-	PlannerRounds    int       `json:"planner_rounds"`
-	WorkerResultRows int       `json:"worker_result_rows"`
+	Start       time.Time `json:"start"`
+	HasUsage    bool      `json:"has_usage"`
+	Calls       int       `json:"calls"`
+	FailedCalls int       `json:"failed_calls"`
+	// Token fields are null (nil pointer) when the bucket has no ledger rows, so
+	// the UI shows an unknown dash rather than a misleading zero. They are only
+	// non-nil for buckets that the usage query returned (HasUsage=true).
+	InputTokens      *int64 `json:"input_tokens"`
+	OutputTokens     *int64 `json:"output_tokens"`
+	CacheReadTokens  *int64 `json:"cache_read_tokens"`
+	CacheWriteTokens *int64 `json:"cache_write_tokens"`
+	PlannerRounds    int    `json:"planner_rounds"`
+	WorkerResultRows int    `json:"worker_result_rows"`
 }
 
 // TaskTimelineEventMarker is a lightweight, replayable event pointer. Details
@@ -218,13 +221,18 @@ GROUP BY bucket_no`, strconv.FormatInt(taskID, 10), from, bucketSeconds, explora
 	for usageRows.Next() {
 		var bucket int
 		var row TaskTimelineBucket
-		if err := usageRows.Scan(&bucket, &row.Calls, &row.FailedCalls, &row.InputTokens, &row.OutputTokens, &row.CacheReadTokens, &row.CacheWriteTokens); err != nil {
+		var in, outTok, cacheRead, cacheWrite int64
+		if err := usageRows.Scan(&bucket, &row.Calls, &row.FailedCalls, &in, &outTok, &cacheRead, &cacheWrite); err != nil {
 			usageRows.Close()
 			return nil, err
 		}
 		if bucket < 0 || bucket >= len(out.Buckets) {
 			continue
 		}
+		row.InputTokens = &in
+		row.OutputTokens = &outTok
+		row.CacheReadTokens = &cacheRead
+		row.CacheWriteTokens = &cacheWrite
 		row.Start = out.Buckets[bucket].Start
 		row.HasUsage = true
 		out.Buckets[bucket] = row

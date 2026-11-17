@@ -92,7 +92,8 @@ func TestTaskTimelineAPIContract(t *testing.T) {
 	if err := json.Unmarshal(rec.Body.Bytes(), &response); err != nil {
 		t.Fatal(err)
 	}
-	if response.UsageStatus != "recorded" || response.Buckets[len(response.Buckets)-1].InputTokens != 123 {
+	last := response.Buckets[len(response.Buckets)-1]
+	if response.UsageStatus != "recorded" || last.InputTokens == nil || *last.InputTokens != 123 {
 		t.Fatalf("ledger row missing from timeline: %+v", response)
 	}
 }
