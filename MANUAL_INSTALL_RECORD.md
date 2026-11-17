@@ -274,3 +274,39 @@ curl http://127.0.0.1:8787/api/health
 ```
 
 注意：上面 `git reset --hard` 只用于测试环境 `/opt/ARTEX` 这个部署目录，不要在本地开发仓库执行。
+
+## 11. 在真实 PostgreSQL 上跑集成测试
+
+本机（开发机）没有 PostgreSQL 时，`go test` 里依赖数据库的用例会全部 skip，
+等于没有验证任何 SQL。时间线功能首版就是因为这个原因带着三个只在真实
+PostgreSQL 上才暴露的缺陷上线：
+
+1. activity 查询传了一个 SQL 文本里从未引用的 `$1` 参数，PostgreSQL 无法推断
+   其类型，报 `SQLSTATE 42P18`；
+2. 桶号用 `from - ts` 计算，对窗口内的行恒为负数，被代码跳过，导致所有用量
+   数据丢失、页面显示无数据；
+3. 无账本记录的桶把 token 字段序列化为 `0`，违反"缺账不显示零用量"的验收条件。
+
+因此涉及 SQL 的改动必须在真实 PostgreSQL 上验证。测试机上已有 PostgreSQL 16
+容器（`artex-postgres`，网络 `artex-net`），可用独立测试库跑集成测试：
+
+```bash
+# 建一个干净的测试库（首次）
+docker exec artex-postgres psql -U artex -d artex \
+  -c 'CREATE DATABASE artex_timeline_test OWNER artex;'
+
+# 同步代码到测试机
+rsync -az --delete --exclude '.git' --exclude 'web/node_modules' \
+  --exclude 'web/.next' ./ root@59.152.125.117:/opt/ARTEX-test/
+
+# 用 Go 容器连测试库跑测试
+ssh root@59.152.125.117 'docker run --rm --network artex-net \
+  -v /opt/ARTEX-test:/workspace -v /opt/ARTEX/.cache/go:/go/pkg/mod \
+  -w /workspace \
+  -e ARTEX_PG_DSN="postgres://artex:artex_test_password@artex-postgres:5432/artex_timeline_test?sslmode=disable" \
+  golang:1.26-bookworm /bin/bash -c "go test ./db ./server -count=1"'
+```
+
+注意：`db/company_scope_test.go` 的 `TestCompanyScopeAttribution` 清理时只删
+assets、不删 company/scope，在同一个库重复运行会因残留 scope 失败。这是仓库
+既有的测试卫生问题，与时间线无关；换全新库即可通过。
