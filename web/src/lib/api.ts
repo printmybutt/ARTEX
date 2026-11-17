@@ -91,6 +91,7 @@ import type {
   TaskNode,
   TaskScopeRow,
   TaskTemplate,
+  TaskTimeline,
   TokenTotal,
   TokenUsage,
   Tool,
@@ -825,8 +826,7 @@ export const api = {
   // 渠道是多实例资源（同一类型可配多个机器人、各有过滤规则），因此独立成组，
   // 不塞进扁平的 settings 键值里。
   notifyMeta: () => get<NotificationMeta>(`/notify/meta`),
-  notifyChannels: () =>
-    get<{ channels: NotificationChannel[] }>(`/notify/channels`).then((r) => arr(r.channels)),
+  notifyChannels: () => get<{ channels: NotificationChannel[] }>(`/notify/channels`).then((r) => arr(r.channels)),
   notifyCreateChannel: (payload: {
     name: string;
     kind: string;
@@ -1302,6 +1302,12 @@ export const api = {
   // per-agent 绑定 / 轮询 / 中断消耗都覆盖）。
   tokensByModel: (task: string) =>
     get<{ models: ModelTokenStat[] }>(`/llm/records/by-model?task=${encodeURIComponent(task)}`),
+  taskTimeline: (task: string, query: { bucket_seconds?: number; cursor?: string } = {}) => {
+    const params = new URLSearchParams();
+    params.set("bucket_seconds", String(query.bucket_seconds ?? 3600));
+    if (query.cursor) params.set("cursor", query.cursor);
+    return get<TaskTimeline>(`/tasks/${encodeURIComponent(task)}/timeline?${params.toString()}`);
+  },
 
   // ---- 一键更新 ----
   // 检查以后端为准：下载是后端做的，浏览器能连 GitHub 而服务器连不上的情况很常见

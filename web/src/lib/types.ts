@@ -846,6 +846,46 @@ export interface ModelTokenStat {
   cache_write_tokens: number;
 }
 
+export type TaskTimelineUsageStatus = "recorded" | "no_rows" | "unavailable";
+
+export interface TaskTimelineBucket {
+  start: string;
+  has_usage: boolean;
+  calls: number;
+  failed_calls: number;
+  input_tokens: number | null;
+  output_tokens: number | null;
+  cache_read_tokens: number | null;
+  cache_write_tokens: number | null;
+  planner_rounds: number;
+  worker_result_rows: number;
+}
+
+export interface TaskTimelineEventMarker {
+  time: string;
+  kind: "planner_round" | "worker_result";
+  source_id: number;
+}
+
+export interface TaskTimeline {
+  as_of: string;
+  from: string;
+  to: string;
+  bucket_seconds: number;
+  usage_status: TaskTimelineUsageStatus;
+  buckets: TaskTimelineBucket[];
+  event_markers: TaskTimelineEventMarker[];
+  session_totals: {
+    worker?: string;
+    input_tokens: number;
+    output_tokens: number;
+    cache_read_tokens: number;
+    cache_write_tokens: number;
+  };
+  has_more_events: boolean;
+  next_cursor?: TaskTimelineEventMarker;
+}
+
 export interface Session {
   id: string;
   role: SessionRole;

@@ -49,9 +49,11 @@ import { OverviewTab } from "./_tabs/overview-tab";
 import { ReportTab } from "./_tabs/report-tab";
 import { RetestsTab } from "./_tabs/retests-tab";
 import { SessionsTab } from "./_tabs/sessions-tab";
+import { TimelineTab } from "./_tabs/timeline-tab";
 
 const TABS = [
   { value: "sessions", label: "会话" },
+  { value: "timeline", label: "时间线" },
   { value: "overview", label: "总览" },
   { value: "graph", label: "探索链路" },
   { value: "broadcast", label: "播报板" },
@@ -206,10 +208,13 @@ function TaskDetailInner() {
   const router = useRouter();
   const searchParams = useSearchParams();
   const id = searchParams.get("id") ?? "";
+  const initialTab = searchParams.get("tab");
   const [task, setTask] = React.useState<Task | null>(null);
   const [paused, setPaused] = React.useState(false);
   const [loaded, setLoaded] = React.useState(false);
-  const [tab, setTab] = React.useState("sessions");
+  const [tab, setTab] = React.useState(
+    initialTab && TABS.some((item) => item.value === initialTab) ? initialTab : "sessions",
+  );
   const [interceptPendingCount, setInterceptPendingCount] = React.useState(0);
   const [profiles, setProfiles] = React.useState<LLMProfile[]>([]);
   const [archiving, setArchiving] = React.useState(false);
@@ -419,6 +424,9 @@ function TaskDetailInner() {
       <div className="flex-1 p-4 lg:p-6">
         <TabsContent value="sessions" className="mt-0">
           <SessionsTab taskId={id} />
+        </TabsContent>
+        <TabsContent value="timeline" className="mt-0">
+          <TimelineTab taskId={id} />
         </TabsContent>
         <TabsContent value="overview" className="mt-0">
           <OverviewTab taskId={id} />

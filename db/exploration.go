@@ -1245,6 +1245,25 @@ func (s *ExplorationStore) TokenTotal() (TokenUsage, error) {
 	return u, err
 }
 
+// SessionTotalsForTimeline returns the legacy whole-task activity.result total
+// inside the same transaction as the timeline ledger buckets. It deliberately
+// uses the old accounting method: the timeline displays it separately and never
+// adds it to llm_usage.
+func (s *ExplorationStore) SessionTotalsForTimeline(q interface {
+	QueryRow(query string, args ...any) *sql.Row
+}) (TokenUsage, error) {
+	var u TokenUsage
+	err := q.QueryRow(`SELECT
+		COALESCE(SUM(input_tokens),0)::bigint,
+		COALESCE(SUM(output_tokens),0)::bigint,
+		COALESCE(SUM(cache_read_tokens),0)::bigint,
+		COALESCE(SUM(cache_write_tokens),0)::bigint
+	FROM activity WHERE exploration_id=$1 AND kind='result'`, s.expID).
+		Scan(&u.InputTokens, &u.OutputTokens, &u.CacheReadTokens, &u.CacheWriteTokens)
+	u.Worker = "activity.result"
+	return u, err
+}
+
 // TokenTotalsAll returns the whole-task token total for every exploration in one
 // query (exploration_id → total), so the task list can show per-task consumption
 // without a query per row.

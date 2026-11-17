@@ -3,6 +3,7 @@ package db
 import (
 	"sort"
 	"strconv"
+	"strings"
 	"time"
 )
 
@@ -43,9 +44,49 @@ CREATE TABLE IF NOT EXISTS llm_usage (
     status         TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_llm_usage_task  ON llm_usage(task_id);
+CREATE INDEX IF NOT EXISTS idx_llm_usage_task_time ON llm_usage(task_id, ts);
 CREATE INDEX IF NOT EXISTS idx_llm_usage_model ON llm_usage(task_id, model);
 CREATE INDEX IF NOT EXISTS idx_llm_usage_exp   ON llm_usage(exploration_id);
 `
+
+// TaskTimelineBucket is one fixed UTC interval in the task timeline. Counters
+// and token sums come from llm_usage; activity-derived fields are joined by
+// the same bucket start. All zero values are meaningful only when HasUsage is
+// true (the corresponding interval has ledger rows).
+type TaskTimelineBucket struct {
+	Start            time.Time `json:"start"`
+	HasUsage         bool      `json:"has_usage"`
+	Calls            int       `json:"calls"`
+	FailedCalls      int       `json:"failed_calls"`
+	InputTokens      int64     `json:"input_tokens"`
+	OutputTokens     int64     `json:"output_tokens"`
+	CacheReadTokens  int64     `json:"cache_read_tokens"`
+	CacheWriteTokens int64     `json:"cache_write_tokens"`
+	PlannerRounds    int       `json:"planner_rounds"`
+	WorkerResultRows int       `json:"worker_result_rows"`
+}
+
+// TaskTimelineEventMarker is a lightweight, replayable event pointer. Details
+// remain in their original activity row and are opened through existing
+// authorized endpoints.
+type TaskTimelineEventMarker struct {
+	Time     time.Time `json:"time"`
+	Kind     string    `json:"kind"`
+	SourceID int64     `json:"source_id"`
+}
+
+// TaskTimelineResult is a read-only task timeline snapshot. usage_status is
+// "recorded" when the ledger has rows, "no_rows" otherwise, and
+// "unavailable" when the caller could not query the ledger.
+type TaskTimelineResult struct {
+	UsageStatus   string                    `json:"usage_status"`
+	Buckets       []TaskTimelineBucket      `json:"buckets"`
+	EventMarkers  []TaskTimelineEventMarker `json:"event_markers"`
+	SessionTotals TokenUsage                `json:"session_totals"`
+	HasMoreEvents bool                      `json:"has_more_events"`
+}
+
+const timelineEventPageSize = 100
 
 // EnsureLLMUsageTable creates the llm_usage metering table if it does not exist.
 func (d *DB) EnsureLLMUsageTable() error {
@@ -105,6 +146,156 @@ ORDER BY SUM(input_tokens) + SUM(output_tokens) DESC, model`, taskID)
 		out = append(out, m)
 	}
 	return out, rows.Err()
+}
+
+// TaskTimeline aggregates one task's usage ledger and activity markers by
+// fixed UTC buckets. The interval is half-open ([from,to)), and bucket
+// boundaries start at from. Historical rows carrying only exploration_id are
+// included only when that exploration maps to exactly one live task row.
+// The SQL DISTINCT join on llm_usage.id prevents a duplicate count if a row
+// has both task_id and exploration_id.
+func (d *DB) TaskTimeline(taskID int64, explorationID int64, from, to time.Time, bucketSeconds int, after *TaskTimelineEventMarker) (*TaskTimelineResult, error) {
+	elapsed := to.Sub(from)
+	bucketCount := int(elapsed / time.Duration(bucketSeconds) * time.Second)
+	if elapsed%time.Duration(bucketSeconds)*time.Second != 0 {
+		bucketCount++
+	}
+	out := &TaskTimelineResult{
+		UsageStatus:  "no_rows",
+		Buckets:      make([]TaskTimelineBucket, bucketCount),
+		EventMarkers: []TaskTimelineEventMarker{},
+	}
+	for i := range out.Buckets {
+		out.Buckets[i].Start = from.Add(time.Duration(i*bucketSeconds) * time.Second)
+	}
+	if bucketCount == 0 {
+		return out, nil
+	}
+
+	tx, err := d.Begin()
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback() //nolint:errcheck
+	// REPEATABLE READ gives buckets and markers one stable read view even if
+	// new usage or activity is written while the request runs.
+	if _, err := tx.Exec(`SET TRANSACTION ISOLATION LEVEL REPEATABLE READ`); err != nil {
+		return nil, err
+	}
+
+	usageRows, err := tx.Query(`
+SELECT bucket_no, COUNT(*)::bigint, COUNT(*) FILTER (WHERE status='error')::bigint,
+       COALESCE(SUM(input_tokens),0)::bigint, COALESCE(SUM(output_tokens),0)::bigint,
+       COALESCE(SUM(cache_read),0)::bigint, COALESCE(SUM(cache_write),0)::bigint
+FROM (
+	SELECT DISTINCT u.id,
+           floor(extract(epoch FROM ($2 - u.ts)) / $3)::int AS bucket_no,
+           u.input_tokens, u.output_tokens, u.cache_read, u.cache_write, u.status
+    FROM llm_usage u
+    LEFT JOIN tasks task ON task.exploration_id = u.exploration_id
+    WHERE (COALESCE(u.task_id,'') = $1 OR u.exploration_id = $4)
+      AND u.ts >= $2 AND u.ts < $5
+      AND (COALESCE(u.task_id,'') = $1 OR task.id IS NOT NULL)
+) usage
+GROUP BY bucket_no`, strconv.FormatInt(taskID, 10), from, bucketSeconds, explorationID, to)
+	if err != nil {
+		return nil, err
+	}
+	for usageRows.Next() {
+		var bucket int
+		var row TaskTimelineBucket
+		if err := usageRows.Scan(&bucket, &row.Calls, &row.FailedCalls, &row.InputTokens, &row.OutputTokens, &row.CacheReadTokens, &row.CacheWriteTokens); err != nil {
+			usageRows.Close()
+			return nil, err
+		}
+		if bucket < 0 || bucket >= len(out.Buckets) {
+			continue
+		}
+		row.Start = out.Buckets[bucket].Start
+		row.HasUsage = true
+		out.Buckets[bucket] = row
+	}
+	if err := usageRows.Err(); err != nil {
+		usageRows.Close()
+		return nil, err
+	}
+	usageRows.Close()
+
+	for _, bucket := range out.Buckets {
+		if bucket.HasUsage {
+			out.UsageStatus = "recorded"
+			break
+		}
+	}
+
+	activityRows, err := tx.Query(`
+SELECT floor(extract(epoch FROM ($2 - a.created_at)) / $3)::int AS bucket_no,
+       a.worker, a.kind, a.id, a.created_at
+FROM activity a
+WHERE a.exploration_id = $4 AND a.created_at >= $2 AND a.created_at < $5
+GROUP BY bucket_no, a.worker, a.kind, a.id, a.created_at`, taskID, from, bucketSeconds, explorationID, to)
+	if err != nil {
+		return nil, err
+	}
+	for activityRows.Next() {
+		var bucket int
+		var worker, kind string
+		var event TaskTimelineEventMarker
+		if err := activityRows.Scan(&bucket, &worker, &kind, &event.SourceID, &event.Time); err != nil {
+			activityRows.Close()
+			return nil, err
+		}
+		if bucket >= 0 && bucket < len(out.Buckets) {
+			if worker == "planner" && kind == "round" {
+				out.Buckets[bucket].PlannerRounds++
+			}
+			if kind == "result" && (worker == "worker" || worker == "" || strings.HasPrefix(worker, "work")) {
+				out.Buckets[bucket].WorkerResultRows++
+			}
+		}
+		if kind != "round" && kind != "result" {
+			continue
+		}
+		if after != nil &&
+			(event.Time.Before(after.Time) ||
+				(event.Time.Equal(after.Time) && event.SourceID <= after.SourceID)) {
+			continue
+		}
+		event.Kind = map[bool]string{true: "planner_round", false: "worker_result"}[kind == "round"]
+		out.EventMarkers = append(out.EventMarkers, event)
+	}
+	if err := activityRows.Err(); err != nil {
+		activityRows.Close()
+		return nil, err
+	}
+	activityRows.Close()
+
+	// A page larger than the requested limit lets the handler report has_more
+	// without a COUNT(*) over the complete history.
+	sort.Slice(out.EventMarkers, func(i, j int) bool {
+		if out.EventMarkers[i].Time.Equal(out.EventMarkers[j].Time) {
+			return out.EventMarkers[i].SourceID < out.EventMarkers[j].SourceID
+		}
+		return out.EventMarkers[i].Time.Before(out.EventMarkers[j].Time)
+	})
+	if len(out.EventMarkers) > timelineEventPageSize+1 {
+		out.EventMarkers = out.EventMarkers[:timelineEventPageSize+1]
+	}
+	if len(out.EventMarkers) > timelineEventPageSize {
+		out.EventMarkers = out.EventMarkers[:timelineEventPageSize]
+		out.HasMoreEvents = true
+	}
+
+	store := d.Exploration(explorationID)
+	if totals, err := store.SessionTotalsForTimeline(tx); err == nil {
+		out.SessionTotals = totals
+	} else {
+		return nil, err
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, err
+	}
+	return out, nil
 }
 
 // ProfileUsage aggregates the whole ledger's token spend for one LLM profile
