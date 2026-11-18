@@ -1304,7 +1304,9 @@ export const api = {
     get<{ models: ModelTokenStat[] }>(`/llm/records/by-model?task=${encodeURIComponent(task)}`),
   taskTimeline: (task: string, query: { bucket_seconds?: number; cursor?: string } = {}) => {
     const params = new URLSearchParams();
-    params.set("bucket_seconds", String(query.bucket_seconds ?? 3600));
+    // Omit bucket_seconds entirely when unset so the server auto-picks the
+    // finest grain that fits the task's lifetime inside its bucket cap.
+    if (query.bucket_seconds) params.set("bucket_seconds", String(query.bucket_seconds));
     if (query.cursor) params.set("cursor", query.cursor);
     return get<TaskTimeline>(`/tasks/${encodeURIComponent(task)}/timeline?${params.toString()}`);
   },
