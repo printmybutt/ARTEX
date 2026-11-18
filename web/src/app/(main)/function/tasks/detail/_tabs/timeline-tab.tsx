@@ -11,6 +11,7 @@ import { api } from "@/lib/api";
 import type { TaskNode, TaskTimeline } from "@/lib/types";
 
 const BUCKET_OPTIONS = [
+  { value: "auto", label: "自动" },
   { value: 900, label: "15 分钟" },
   { value: 3600, label: "1 小时" },
   { value: 21600, label: "6 小时" },
@@ -54,7 +55,9 @@ function formatTime(value: string, bucketSeconds: number): string {
 
 export function TimelineTab({ taskId }: { taskId: string }) {
   const [timeline, setTimeline] = React.useState<TaskTimeline | null>(null);
-  const [bucketSeconds, setBucketSeconds] = React.useState(3600);
+  // "auto" lets the backend pick the finest grain that fits the task's whole
+  // lifetime inside its bucket cap; a number pins an explicit grain.
+  const [grain, setGrain] = React.useState<string>("auto");
   const [cursor, setCursor] = React.useState<string | undefined>(undefined);
   const [loading, setLoading] = React.useState(false);
   const [error, setError] = React.useState("");
@@ -68,12 +71,12 @@ export function TimelineTab({ taskId }: { taskId: string }) {
   }, [taskId]);
 
   const load = React.useCallback(
-    async (nextBucketSeconds = bucketSeconds, nextCursor = cursor) => {
+    async (nextGrain = grain, nextCursor = cursor) => {
       setLoading(true);
       setError("");
       try {
         const response = await api.taskTimeline(taskId, {
-          bucket_seconds: nextBucketSeconds,
+          bucket_seconds: nextGrain === "auto" ? undefined : Number(nextGrain),
           cursor: nextCursor,
         });
         setTimeline(response);
@@ -83,13 +86,16 @@ export function TimelineTab({ taskId }: { taskId: string }) {
         setLoading(false);
       }
     },
-    [bucketSeconds, cursor, taskId],
+    [grain, cursor, taskId],
   );
 
   React.useEffect(() => {
     setCursor(undefined);
-    void load(bucketSeconds, undefined);
-  }, [bucketSeconds, load]);
+    void load(grain, undefined);
+  }, [grain, load]);
+
+  // The grain actually used by the rendered buckets (server echoes it back).
+  const bucketSeconds = timeline?.bucket_seconds ?? 3600;
 
   const maxInput = Math.max(1, ...(timeline?.buckets.map((b) => b.input_tokens ?? 0) ?? [1]));
   const markers = timeline?.event_markers ?? [];
@@ -107,18 +113,13 @@ export function TimelineTab({ taskId }: { taskId: string }) {
             <ClockIcon className="size-4 text-blue-500" /> 用量与事件时间线
           </CardTitle>
           <CardDescription>
-            逐调用账本按 UTC 固定时间桶聚合；缓存读已包含在输入中，不会额外相加。默认显示最近 48
-            小时，当前版可再选择粒度。
+            逐调用账本按 UTC 固定时间桶聚合；缓存读已包含在输入中，不会额外相加。默认展示任务创建
+            至今的区间，粒度可再手动指定。
           </CardDescription>
         </CardHeader>
         <CardContent className="flex flex-col gap-4">
           <div className="flex flex-wrap items-center gap-2">
-            <NativeSelect
-              size="sm"
-              value={String(bucketSeconds)}
-              onChange={(e) => setBucketSeconds(Number(e.target.value))}
-              aria-label="时间桶粒度"
-            >
+            <NativeSelect size="sm" value={grain} onChange={(e) => setGrain(e.target.value)} aria-label="时间桶粒度">
               {BUCKET_OPTIONS.map((option) => (
                 <NativeSelectOption key={option.value} value={String(option.value)}>
                   {option.label}
@@ -252,7 +253,7 @@ export function TimelineTab({ taskId }: { taskId: string }) {
               disabled={loading}
               onClick={() => {
                 setCursor(nextCursor);
-                void load(bucketSeconds, nextCursor);
+                void load(grain, nextCursor);
               }}
             >
               加载更多

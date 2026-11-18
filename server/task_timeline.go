@@ -21,6 +21,32 @@ var taskTimelineAllowedBuckets = map[int]bool{
 	86400: true,
 }
 
+// taskTimelineGrains lists the allowed bucket sizes from finest to coarsest so
+// the handler can auto-pick the finest grain that keeps the whole task span
+// inside the 672-bucket response cap.
+var taskTimelineGrains = []int{900, 3600, 21600, 86400}
+
+func taskTimelineBucketCount(span time.Duration, bucketSeconds int) int {
+	spanLen := time.Duration(bucketSeconds) * time.Second
+	if spanLen <= 0 {
+		return 0
+	}
+	return int((span + spanLen - 1) / spanLen)
+}
+
+// taskTimelineAutoGrain returns the finest allowed bucket size whose bucket
+// count for the given span stays within the response cap, falling back to the
+// coarsest grain when even that overflows (the handler then rejects it).
+func taskTimelineAutoGrain(span time.Duration) int {
+	grain := taskTimelineGrains[len(taskTimelineGrains)-1]
+	for _, candidate := range taskTimelineGrains {
+		if taskTimelineBucketCount(span, candidate) <= taskTimelineMaxBuckets {
+			return candidate
+		}
+	}
+	return grain
+}
+
 type taskTimelineResponse struct {
 	AsOf          time.Time                    `json:"as_of"`
 	From          time.Time                    `json:"from"`
@@ -81,29 +107,43 @@ func (s *Server) taskTimeline(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Default window is the task's own lifetime: creation → now (or the
+	// completion moment for finished tasks), so a short-lived task is not
+	// padded with empty pre-creation buckets.
 	asOf := time.Now().UTC()
-	defaultFrom := asOf.Add(-taskTimelineDefaultTo)
+	lifecycle := t.lifecycleSnapshot()
 	if !toPresent {
-		if lifecycle := t.lifecycleSnapshot(); lifecycle.CompletedAt > 0 {
+		if lifecycle.CompletedAt > 0 {
 			completed := time.Unix(lifecycle.CompletedAt, 0).UTC()
 			if completed.Before(asOf) {
 				asOf = completed
 			}
 		}
 		to = asOf
-		if !fromPresent {
-			from = asOf.Add(-taskTimelineDefaultTo)
-		}
 	}
 	if !fromPresent {
-		if to.IsZero() {
-			from = defaultFrom
+		if t.CreatedAt > 0 {
+			from = time.Unix(t.CreatedAt, 0).UTC()
+			if from.After(to) {
+				from = to
+			}
 		} else {
 			from = to.Add(-taskTimelineDefaultTo)
 		}
 	}
-	bucketSpan := time.Duration(bucketSeconds) * time.Second
-	bucketCount := int((to.Sub(from) + bucketSpan - 1) / bucketSpan)
+	span := to.Sub(from)
+	explicitGrain := query.Get("bucket_seconds") != ""
+	if !explicitGrain {
+		// Auto-pick the finest grain that keeps the whole span inside the cap.
+		bucketSeconds = taskTimelineAutoGrain(span)
+	}
+	bucketCount := taskTimelineBucketCount(span, bucketSeconds)
+	if bucketCount == 0 {
+		// Degenerate span (task created this instant): anchor one bucket ending
+		// at `to` so the view is never completely empty.
+		from = to.Add(-time.Duration(bucketSeconds) * time.Second)
+		bucketCount = 1
+	}
 	if bucketCount < 0 || bucketCount > taskTimelineMaxBuckets {
 		writeErr(w, http.StatusBadRequest, "requested range exceeds 672 timeline buckets")
 		return

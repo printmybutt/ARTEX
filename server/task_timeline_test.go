@@ -19,6 +19,7 @@ func TestTaskTimelineAPIContract(t *testing.T) {
 		t.Skipf("postgres unavailable (%v) - skipping", err)
 	}
 	t.Cleanup(func() { _ = m.Close() })
+	createdBefore := time.Now().UTC()
 	task, err := m.CreateTask("timeline api", "timeline goal", nil, 0, 0)
 	if err != nil {
 		t.Fatal(err)
@@ -79,10 +80,13 @@ func TestTaskTimelineAPIContract(t *testing.T) {
 	if err := json.Unmarshal(rec.Body.Bytes(), &response); err != nil {
 		t.Fatal(err)
 	}
+	// Default window is the task's lifetime: from ≈ creation, to ≈ now. A
+	// freshly created task spans well under 15 minutes, so the auto grain is
+	// the finest one and the view collapses to a single bucket.
 	if !response.AsOf.After(time.Time{}) || !response.To.Equal(response.AsOf) ||
-		!response.From.Equal(response.AsOf.Add(-48*time.Hour)) || response.BucketSeconds != 3600 ||
-		response.UsageStatus != "no_rows" || len(response.Buckets) != 48 {
-		t.Fatalf("unexpected timeline response: %+v", response)
+		response.From.Before(createdBefore.Add(-time.Second)) || response.From.After(response.To) ||
+		response.BucketSeconds != 900 || response.UsageStatus != "no_rows" || len(response.Buckets) != 1 {
+		t.Fatalf("unexpected timeline response: %+v (createdBefore=%s)", response, createdBefore)
 	}
 	if _, err := m.pg.Exec(`INSERT INTO llm_usage(task_id, exploration_id, input_tokens, output_tokens) VALUES ($1,$2,123,7)`,
 		strconv.FormatInt(numericTaskID, 10), task.ExpID); err != nil {
